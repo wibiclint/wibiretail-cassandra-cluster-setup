@@ -9,6 +9,7 @@ import subprocess
 import sys
 import re
 import shutil
+import textwrap
 from argparse import RawTextHelpFormatter
 
 
@@ -41,20 +42,19 @@ def add_action(action_name, help_text):
     # TODO: Remove any extra random white space from the help.
     #p = re.compile(r'\s+')
     #actions_help[action_name] = p.replace(' ', action_help)
-    actions_help[action_name] = help_text
+    actions_help[action_name] = textwrap.dedent(help_text)
 
 add_action("help", "Display help about different actions.")
-add_action("install-bento",
-"""
-Will set up a bento box for you.  Assumes that you are in a directory with a tar.gz file for the latest bento build.
-This command will rm -rf your current bento box (which is also assumed to be in your current directory).  Also does
-stuff like editing out lines that break bin/kiji and updating the scoring server conf file appropriately.
-""")
-add_action("copy-bento",
-"""
-Will tar up the current bento box (after whatever edits were made in the previous step, copy it to the infra cluster,
-and unpack it.
-""")
+add_action("install-bento", """\
+        Will set up a bento box for you.  Assumes that you are in a directory with a tar.gz file for the latest bento
+        build. This command will rm -rf your current bento box (which is also assumed to be in your current
+        directory).  Also does stuff like editing out lines that break bin/kiji and updating the scoring server conf
+        file appropriately.
+    """)
+add_action("copy-bento", """\
+        Will tar up the current bento box (after whatever edits were made in the previous step, copy it to the infra
+        cluster, and unpack it.
+    """)
 add_action("install-kiji", "Install kiji instance for wibi retail")
 add_action("install-model-repo", "Create a directory on the server for the model repo and initialize the mode repo.")
 add_action("start-scoring-server", "Update the system table and start the scoring server, then verify that it is working.")

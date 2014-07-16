@@ -1,7 +1,8 @@
 """ Python script to manage running jobs, checking the results, etc. """
 
 import argparse
-import fabric
+import fabric.api
+import fabric.network
 import os
 import pprint
 import subprocess
@@ -27,7 +28,6 @@ class TimeInterval:
         """ TODO: Check times formatting properly here """
         self.start = start
         self.end = end
-
 
 # Command-line "actions" the user can use and the corresponding help messages.
 actions_help = {}
@@ -109,6 +109,8 @@ class InfraManager:
 
         # TODO: Kiji classpath setup
         #os.environ['KIJI_CLASSPATH'] = classpath
+
+        self.remote_host = "infra01.ul.wibidata.net"
 
         if opts.show_classpath:
             print("export KIJI_CLASSPATH=%s" % classpath)
@@ -262,15 +264,49 @@ class InfraManager:
             uri=uri)
         self._run_kiji_job(cmd)
 
+    # ----------------------------------------------------------------------------------------------
+    # Copy the Bento tar file (post-editing) to the cluster.
+    def _do_action_copy_bento(self):
+        """ scp the bento box over to the cluster and untar it. """
+
+        def copy_bento():
+            """ Wrap all of this stuff into a function to call with fabric's "execute" """
+            assert os.path.isfile(self.cluster_tgz)
+
+            # Actually run the scp command.
+            fabric.api.put(self.cluster_tgz)
+
+            # Remove the path from the name and get just the file name.
+            cluster_tar_name = os.path.basename(self.cluster_tgz)
+
+            bento_dir_name = os.path.basename(
+                self.bento_home if not self.bento_home.endswith("/") else self.bento_home[:-1])
+            assert bento_dir_name != ""
+
+            # Delete what was there before.
+            fabric.api.run("rm -rf %s" % bento_dir_name)
+
+            # Untar it!
+            fabric.api.run("tar -zxvf %s" % cluster_tar_name)
+
+        fabric.api.execute(copy_bento, host=self.remote_host)
+
+
     def _run_actions(self):
         """ Run whatever actions the user has specified """
 
         if "install-bento" in self.actions:
             self._do_action_install_bento()
 
+        if "copy-bento" in self.actions:
+            self._do_action_copy_bento()
+
     def go(self, args):
-        self._parse_options(args)
-        self._run_actions()
+        try:
+            self._parse_options(args)
+            self._run_actions()
+        finally:
+            fabric.network.disconnect_all()
 
 
 if __name__ == "__main__":

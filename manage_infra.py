@@ -57,6 +57,19 @@ add_action("install-kiji", "Install kiji instance for wibi retail")
 add_action("install-model-repo", "Create a directory on the server for the model repo and initialize the mode repo.")
 add_action("start-scoring-server", "Update the system table and start the scoring server, then verify that it is working.")
 
+description = """
+Script to set up WibiRetail on Cassandra-Kiji on the infra cluster
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+How it works:
+- You provide pointers to your bento and retail tgz files
+- The script unzips them
+- It edits the bento box, zips it up again, and scps it to the cluster
+- It can then set up services (e.g., model repo, scoring server on the cluster)
+- It will run most of the kiji commands (e.g., install, put) from the client
+
+"""
+
 class InfraManager:
 
     def _help_actions(self):
@@ -71,7 +84,7 @@ class InfraManager:
         """ Add actions for the command-line arguments parser """
         parser = argparse.ArgumentParser(
             formatter_class=RawTextHelpFormatter,
-            description="Setup WibiRetail on C* on infra cluster:\n\t" + "\n\t".join(possible_actions))
+            description=description + "Possible actions:\n\t" + "\n\t".join(possible_actions))
 
         parser.add_argument(
             "action",
@@ -79,39 +92,75 @@ class InfraManager:
             help="Action to take")
 
         parser.add_argument(
-            '--bento-home',
-            help='Location of bento box',
-            default='kiji-bento-fugu')
-
-        parser.add_argument(
             '--bento-tgz',
-            help='Bento TAR file name (default is tar.gz in pwd)',
+            help='Bento box archive file name (default is bento-*-tar.gz in pwd)',
             default=None)
 
         parser.add_argument(
-            "--show-classpath",
-            action="store_true",
-            default=False,
-            help="Echo $KIJI_CLASSPATH and exit")
+            '--retail-tgz',
+            help='WibiRetail archive file name (default is wibi-retail-*-tar.gz in pwd)',
+            default=None)
 
         return parser
 
+    def _get_archive_location(self, option_value, archive_prefix):
+        """
+
+        :param option_value:
+        :param archive_prefix:
+        :return:
+        """
+        if option_value is not None:
+            assert os.path.isfile(option_value)
+            return option_value
+        files_this_dir = os.listdir(os.getcwd())
+        candidates = set()
+        for file_name in files_this_dir:
+            if file_name.startswith(archive_prefix) and file_name.endswith(".tar.gz"):
+                candidates.add(file_name)
+        assert len(candidates) == 1, "Could not find exactly one tar.gz file starting with %s in pwd" % archive_prefix
+        return list(candidates)[0]
+
+    def _get_bento_dir_from_archive_name(self, bento_tgz):
+        bento_root = os.path.basename(bento_tgz)
+        p_bento = re.compile(r'^kiji-bento-(?P<release>\w+)-')
+        m_bento = p_bento.search(bento_root)
+        assert m_bento, bento_root
+        return 'kiji-bento-%s' % m_bento.group('release')
+
+    def _get_retail_dir_from_archive_name(self, retail_tgz):
+        retail_root = os.path.basename(retail_tgz)
+        p_retail = re.compile(r'wibi-retail-(?P<version>\d+\.\d+\.\d+(-SNAPSHOT)?)-release.tar.gz')
+        m_retail = p_retail.match(retail_root)
+        assert m_retail
+        return 'wibi-retail-%s' % m_retail.group('version')
+
     def _setup_environment_vars(self, opts):
         """ Set up useful variables (would be environment vars outside of the script) """
-        self.local_bento_dir = opts.bento_home
-        self.bento_tgz = opts.bento_tgz
-        if None == self.bento_tgz:
-            self.bento_tgz = self._find_bento_tgz()
+
+        self.bento_tgz = self._get_archive_location(opts.bento_tgz, "kiji-bento")
+        self.retail_tgz = self._get_archive_location(opts.retail_tgz, "wibi-retail")
+
+        self.local_bento_dir = self._get_bento_dir_from_archive_name(self.bento_tgz)
+        self.local_retail_dir = self._get_retail_dir_from_archive_name(self.retail_tgz)
+
+        print "Bento Box:            " + self.bento_tgz
+        print "Local bento dir:      " + self.local_bento_dir
+        print "Wibi Retail:          " + self.retail_tgz
+        print "Local retail dir:     " + self.local_retail_dir
+
+        # Name of archive created from edited Bento Box (to send to infra cluster).
         self.cluster_tgz = "cluster.tar.gz"
         self.kiji_uri = "kiji-cassandra://infra02.ul.wibidata.net/infra02.ul.wibidata.net/retail"
 
-        # TODO: Kiji classpath setup
-        #os.environ['KIJI_CLASSPATH'] = classpath
+        self.local_env_vars = {
+            'KIJI_CLASSPATH': '{bento}/lib/*:{bento}/model-repo/lib/*:{bento}/scoring-server/lib/*'.format(
+                bento=self.local_bento_dir
+            ),
+        }
 
-        self.remote_bento_dir = os.path.basename(
-            self.local_bento_dir if not self.local_bento_dir.endswith("/") else self.local_bento_dir[:-1])
-
-        assert self.remote_bento_dir != ""
+    def _setup_remote_environment_vars(self, opts):
+        self.remote_bento_dir = self.local_bento_dir
         self.remote_host = "infra01.ul.wibidata.net"
         self.remote_model_repo_dir = "/tmp/retail-model-repo"
         self.remote_env_vars = {
@@ -120,11 +169,6 @@ class InfraManager:
             'HBASE_HOME' : '/usr/lib/hbase',
             'KIJI_CLASSPATH': '{bento}/lib/*:{bento}/model-repo/lib/*:{bento}/scoring-server/lib/*'.format(
                 bento=self.remote_bento_dir
-            ),
-        }
-        self.local_env_vars = {
-            'KIJI_CLASSPATH': '{bento}/lib/*:{bento}/model-repo/lib/*:{bento}/scoring-server/lib/*'.format(
-                bento=self.local_bento_dir
             ),
         }
 
@@ -139,10 +183,7 @@ class InfraManager:
         if 'help' in self.actions: self._help_actions()
 
         self._setup_environment_vars(opts)
-
-    def _find_bento_tgz(self):
-        """ Locate the bento box! """
-        assert False, "Implement this!"
+        self._setup_remote_environment_vars(opts)
 
     # ----------------------------------------------------------------------------------------------
     # Methods for installing the Bento Box.

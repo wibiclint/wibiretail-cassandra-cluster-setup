@@ -23,13 +23,6 @@ def run(cmd):
         raise cpe
     return res
 
-
-class TimeInterval:
-    def __init__(self, start, end):
-        """ TODO: Check times formatting properly here """
-        self.start = start
-        self.end = end
-
 # Command-line "actions" the user can use and the corresponding help messages.
 actions_help = {}
 
@@ -45,17 +38,25 @@ def add_action(action_name, help_text):
     actions_help[action_name] = textwrap.dedent(help_text)
 
 add_action("help", "Display help about different actions.")
+
 add_action("install-bento", """\
         Will set up a bento box for you.  Assumes that you are in a directory with a tar.gz file for the latest bento
         build. This command will rm -rf your current bento box (which is also assumed to be in your current
         directory).  Also does stuff like editing out lines that break bin/kiji and updating the scoring server conf
         file appropriately.""")
+
 add_action("copy-bento", """\
         Will tar up the current bento box (after whatever edits were made in the previous step, copy it to the infra
         cluster, and unpack it.""")
+
 add_action("install-kiji", "Install kiji instance for wibi retail")
+
 add_action("install-model-repo", "Create a directory on the server for the model repo and initialize the mode repo.")
+
 add_action("start-scoring-server", "Update the system table and start the scoring server, then verify that it is working.")
+
+add_action("create-tables", "Create the WibiRetail tables.")
+
 
 description = """
 Script to set up WibiRetail on Cassandra-Kiji on the infra cluster
@@ -144,6 +145,10 @@ class InfraManager:
         self.local_bento_dir = self._get_bento_dir_from_archive_name(self.bento_tgz)
         self.local_retail_dir = self._get_retail_dir_from_archive_name(self.retail_tgz)
 
+        if not os.path.isdir(self.local_retail_dir):
+            fabric.api.local("tar -zxvf %s" % self.retail_tgz)
+        assert os.path.isdir(self.local_retail_dir)
+
         print "Bento Box:            " + self.bento_tgz
         print "Local bento dir:      " + self.local_bento_dir
         print "Wibi Retail:          " + self.retail_tgz
@@ -154,8 +159,9 @@ class InfraManager:
         self.kiji_uri = "kiji-cassandra://infra02.ul.wibidata.net/infra02.ul.wibidata.net/retail"
 
         self.local_env_vars = {
-            'KIJI_CLASSPATH': '{bento}/lib/*:{bento}/model-repo/lib/*:{bento}/scoring-server/lib/*'.format(
-                bento=self.local_bento_dir
+            'KIJI_CLASSPATH': '{bento}/lib/*:{bento}/model-repo/lib/*:{bento}/scoring-server/lib/*:{retail}/layouts/lib/*'.format(
+                bento=self.local_bento_dir,
+                retail=self.local_retail_dir,
             ),
         }
 
@@ -184,6 +190,25 @@ class InfraManager:
 
         self._setup_environment_vars(opts)
         self._setup_remote_environment_vars(opts)
+
+    # ----------------------------------------------------------------------------------------------
+    # Utility methods for doing things on the server.
+    def _run_remote_kiji_command(self, kiji_command, pty=True):
+        """
+        Run a Kiji command on the remote server with the proper environment setup.
+        :param kiji_command: The command to run.
+        :param pty: Pty parameter to pass to fabric (false for scoring server)
+        """
+        kiji_env = os.path.join(self.remote_bento_dir, "bin", "kiji-env.sh")
+        cmd_string = "source %s; %s" % (kiji_env, kiji_command)
+        with fabric.api.shell_env(**self.remote_env_vars):
+            fabric.api.run(cmd_string, pty=pty)
+
+    def _run_kiji_command(self, kiji_command):
+        kiji_env = os.path.join(self.local_bento_dir, "bin", "kiji-env.sh")
+        cmd_string = "source %s; %s" % (kiji_env, kiji_command)
+        with fabric.api.shell_env(**self.local_env_vars):
+            fabric.api.local(cmd_string)
 
     # ----------------------------------------------------------------------------------------------
     # Methods for installing the Bento Box.
@@ -393,25 +418,17 @@ class InfraManager:
 
         fabric.api.execute(start_scoring_server, host=self.remote_host)
 
-
     # ----------------------------------------------------------------------------------------------
-    # Utility methods for doing things on the server.
-    def _run_remote_kiji_command(self, kiji_command, pty=True):
-        """
-        Run a Kiji command on the remote server with the proper environment setup.
-        :param kiji_command: The command to run.
-        :param pty: Pty parameter to pass to fabric (false for scoring server)
-        """
-        kiji_env = os.path.join(self.remote_bento_dir, "bin", "kiji-env.sh")
-        cmd_string = "source %s; %s" % (kiji_env, kiji_command)
-        with fabric.api.shell_env(**self.remote_env_vars):
-            fabric.api.run(cmd_string, pty=pty)
-
-    def _run_kiji_command(self, kiji_command):
-        kiji_env = os.path.join(self.local_bento_dir, "bin", "kiji-env.sh")
-        cmd_string = "source %s; %s" % (kiji_env, kiji_command)
-        with fabric.api.shell_env(**self.local_env_vars):
-            fabric.api.local(cmd_string)
+    # Create the tables for wibi retail.
+    def _do_action_create_tables(self):
+        """ Create the WibiRetail tables.  Call Kiji commands on the client. """
+        for ddl in ['users-table', 'products-table', 'product-lists-table']:
+            cmd = "kiji-schema-shell --kiji={kiji} --file={retail}/layouts/ddl/{ddl}.ddl".format(
+                kiji=self.kiji_uri,
+                retail=self.local_retail_dir,
+                ddl=ddl
+            )
+            self._run_kiji_command(cmd)
 
     # ----------------------------------------------------------------------------------------------
     # Main method.
@@ -429,6 +446,9 @@ class InfraManager:
 
         if "start-scoring-server" in self.actions:
             self._do_action_start_scoring_server()
+
+        if "create-tables" in self.actions:
+            self._do_action_create_tables()
 
     def go(self, args):
         try:

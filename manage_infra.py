@@ -98,7 +98,7 @@ class InfraManager:
 
     def _setup_environment_vars(self, opts):
         """ Set up useful variables (would be environment vars outside of the script) """
-        self.bento_home = opts.bento_home
+        self.local_bento_dir = opts.bento_home
         self.bento_tgz = opts.bento_tgz
         if None == self.bento_tgz:
             self.bento_tgz = self._find_bento_tgz()
@@ -109,7 +109,7 @@ class InfraManager:
         #os.environ['KIJI_CLASSPATH'] = classpath
 
         self.remote_bento_dir = os.path.basename(
-            self.bento_home if not self.bento_home.endswith("/") else self.bento_home[:-1])
+            self.local_bento_dir if not self.local_bento_dir.endswith("/") else self.local_bento_dir[:-1])
 
         assert self.remote_bento_dir != ""
         self.remote_host = "infra01.ul.wibidata.net"
@@ -120,6 +120,11 @@ class InfraManager:
             'HBASE_HOME' : '/usr/lib/hbase',
             'KIJI_CLASSPATH': '{bento}/lib/*:{bento}/model-repo/lib/*:{bento}/scoring-server/lib/*'.format(
                 bento=self.remote_bento_dir
+            ),
+        }
+        self.local_env_vars = {
+            'KIJI_CLASSPATH': '{bento}/lib/*:{bento}/model-repo/lib/*:{bento}/scoring-server/lib/*'.format(
+                bento=self.local_bento_dir
             ),
         }
 
@@ -148,15 +153,15 @@ class InfraManager:
     def _unzip_bento_box(self):
         """ Unzip the Bento Box. """
         cmd = "rm -rf {bento_dir}; tar -zxvf {bento_tar}".format(
-            bento_dir=self.bento_home,
+            bento_dir=self.local_bento_dir,
             bento_tar=self.bento_tgz)
         print(run(cmd))
-        assert os.path.isdir(self.bento_home)
+        assert os.path.isdir(self.local_bento_dir)
 
     def _fix_kiji_bash_script(self):
         """ Remove lines about upgrade_informer_script. """
         # Read until the line that contains "upgrade_informer_script", then skip four lines
-        kiji_bash = os.path.join(self.bento_home, "bin", "kiji")
+        kiji_bash = os.path.join(self.local_bento_dir, "bin", "kiji")
         assert os.path.isfile(kiji_bash)
 
         # Read contents of script.
@@ -179,7 +184,7 @@ class InfraManager:
 
     def _fix_scoring_server_bash_script(self):
         """ Remove erroneous reference in to Jenkins's $JAVA_HOME. """
-        scoring_server_bash = os.path.join(self.bento_home, "scoring-server", "bin", "kiji-scoring-server")
+        scoring_server_bash = os.path.join(self.local_bento_dir, "scoring-server", "bin", "kiji-scoring-server")
         assert os.path.isfile(scoring_server_bash), scoring_server_bash
 
         ss_for_read = open(scoring_server_bash)
@@ -193,7 +198,7 @@ class InfraManager:
 
     def _fix_scoring_server_config_json(self):
         """ Update the scoring server JSON config file to match desired settings for WibiRetail. """
-        scoring_server_json = os.path.join(self.bento_home, "scoring-server", "conf", "configuration.json")
+        scoring_server_json = os.path.join(self.local_bento_dir, "scoring-server", "conf", "configuration.json")
         assert os.path.isfile(scoring_server_json)
 
         ss_for_write = open(scoring_server_json, "w")
@@ -220,13 +225,13 @@ class InfraManager:
         ]
 
         for jar in jars_to_copy:
-            orig = os.path.join(self.bento_home, "lib", jar)
+            orig = os.path.join(self.local_bento_dir, "lib", jar)
             assert os.path.isfile(orig)
-            dest = os.path.join(self.bento_home, "scoring-server", "lib", jar)
+            dest = os.path.join(self.local_bento_dir, "scoring-server", "lib", jar)
             shutil.copyfile(orig, dest)
 
         for jar in jars_to_remove:
-            orig = os.path.join(self.bento_home, "scoring-server", "lib", jar)
+            orig = os.path.join(self.local_bento_dir, "scoring-server", "lib", jar)
             assert os.path.isfile(orig), orig
             os.remove(orig)
 
@@ -235,7 +240,7 @@ class InfraManager:
 
         cmd = "tar -czvf {cluster_tar} {bento_home}".format(
             cluster_tar=self.cluster_tgz,
-            bento_home=self.bento_home
+            bento_home=self.local_bento_dir
         )
         print(run(cmd))
 
@@ -260,17 +265,6 @@ class InfraManager:
         self._archive_bento_for_cluster()
 
 
-    def _run_kiji_job(self, cmd):
-        cmd = "source {bento_home}/bin/kiji-env.sh; {cmd}".format(
-            bento_home=self.bento_home, cmd=cmd)
-        print(run(cmd))
-
-    def _scan_table(self, uri):
-        """ Scan this table and print out a couple of rows as a sanity check """
-        cmd = 'kiji scan {kiji_uri}/{uri} --max-versions=10'.format(
-            kiji_uri=self.kiji_uri,
-            uri=uri)
-        self._run_kiji_job(cmd)
 
     # ----------------------------------------------------------------------------------------------
     # Copy the Bento tar file (post-editing) to the cluster.
@@ -333,6 +327,13 @@ class InfraManager:
 
         """
 
+        # Run this locally
+        system_table_command = """\
+            kiji system-table --kiji={kiji} --interactive=false
+            --do=put org.kiji.scoring.lib.server.ScoringServerScoreFunction.base_url_key
+            http://infra01.ul.wibidata.net:7080""".format(kiji=self.kiji_uri)
+        self._run_kiji_command(textwrap.dedent(system_table_command).replace('\n', ' '))
+
         def start_scoring_server():
             jps_results = fabric.api.run("/usr/java/jdk1.7.0_51/bin/jps")
              # Kill the scoring server
@@ -344,32 +345,35 @@ class InfraManager:
                 if job != 'ScoringServer': continue
                 cmd = "kill -9 " + pid
                 fabric.api.run(cmd)
+            self._run_remote_kiji_command(
+                "{}/scoring-server/bin/kiji-scoring-server".format(self.remote_bento_dir),
+                pty=False)
+            fabric.api.run('cat {}/scoring-server/logs/console.out'.format(self.remote_bento_dir))
 
         fabric.api.execute(start_scoring_server, host=self.remote_host)
 
-        def foo():
-            x = self._get_remote_kiji_command_string("kiji ls")
-            fabric.api.run(x)
-        fabric.api.execute(foo, host=self.remote_host)
 
     # ----------------------------------------------------------------------------------------------
     # Utility methods for doing things on the server.
-    def _get_remote_kiji_command_string(self, kiji_command):
-        """
-        :param kiji_command: A kiji command to run.
-        :return: The same command, prefixed with all of the appropriate path setup.
-        """
-        kiji_env = os.path.join(self.remote_bento_dir, "bin", "kiji-env.sh")
-        return "source %s; %s" % (kiji_env, kiji_command)
-
-    def _run_remote_kiji_command(self, kiji_command):
+    def _run_remote_kiji_command(self, kiji_command, pty=True):
         """
         Run a Kiji command on the remote server with the proper environment setup.
         :param kiji_command: The command to run.
+        :param pty: Pty parameter to pass to fabric (false for scoring server)
         """
+        kiji_env = os.path.join(self.remote_bento_dir, "bin", "kiji-env.sh")
+        cmd_string = "source %s; %s" % (kiji_env, kiji_command)
         with fabric.api.shell_env(**self.remote_env_vars):
-            fabric.api.run(self._get_remote_kiji_command_string(kiji_command))
+            fabric.api.run(cmd_string, pty=pty)
 
+    def _run_kiji_command(self, kiji_command):
+        kiji_env = os.path.join(self.local_bento_dir, "bin", "kiji-env.sh")
+        cmd_string = "source %s; %s" % (kiji_env, kiji_command)
+        with fabric.api.shell_env(**self.local_env_vars):
+            fabric.api.local(cmd_string)
+
+    # ----------------------------------------------------------------------------------------------
+    # Main method.
     def _run_actions(self):
         """ Run whatever actions the user has specified """
 

@@ -105,7 +105,7 @@ class InfraManager:
         if None == self.bento_tgz:
             self.bento_tgz = self._find_bento_tgz()
         self.cluster_tgz = "cluster.tar.gz"
-        self.kiji_uri = "kiji://infra02.ul.wibidata.net/infra02.ul.wibidata.net/retail"
+        self.kiji_uri = "kiji-cassandra://infra02.ul.wibidata.net/infra02.ul.wibidata.net/retail"
 
         # TODO: Kiji classpath setup
         #os.environ['KIJI_CLASSPATH'] = classpath

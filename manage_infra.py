@@ -49,12 +49,10 @@ add_action("install-bento", """\
         Will set up a bento box for you.  Assumes that you are in a directory with a tar.gz file for the latest bento
         build. This command will rm -rf your current bento box (which is also assumed to be in your current
         directory).  Also does stuff like editing out lines that break bin/kiji and updating the scoring server conf
-        file appropriately.
-    """)
+        file appropriately.""")
 add_action("copy-bento", """\
         Will tar up the current bento box (after whatever edits were made in the previous step, copy it to the infra
-        cluster, and unpack it.
-    """)
+        cluster, and unpack it.""")
 add_action("install-kiji", "Install kiji instance for wibi retail")
 add_action("install-model-repo", "Create a directory on the server for the model repo and initialize the mode repo.")
 add_action("start-scoring-server", "Update the system table and start the scoring server, then verify that it is working.")
@@ -110,11 +108,20 @@ class InfraManager:
         # TODO: Kiji classpath setup
         #os.environ['KIJI_CLASSPATH'] = classpath
 
-        self.remote_host = "infra01.ul.wibidata.net"
+        self.remote_bento_dir = os.path.basename(
+            self.bento_home if not self.bento_home.endswith("/") else self.bento_home[:-1])
 
-        if opts.show_classpath:
-            print("export KIJI_CLASSPATH=%s" % classpath)
-            sys.exit(0)
+        assert self.remote_bento_dir != ""
+        self.remote_host = "infra01.ul.wibidata.net"
+        self.remote_model_repo_dir = "/tmp/retail-model-repo"
+        self.remote_env_vars = {
+            'JAVA_HOME' : '/usr/java/jdk1.7.0_51',
+            'HADOOP_HOME' : '/usr/lib/hadoop',
+            'HBASE_HOME' : '/usr/lib/hbase',
+            'KIJI_CLASSPATH': '{bento}/lib/*:{bento}/model-repo/lib/*:{bento}/scoring-server/lib/*'.format(
+                bento=self.remote_bento_dir
+            ),
+        }
 
     def _parse_options(self, args):
         """ Parse the command-line options and configure the script appropriately """
@@ -190,13 +197,14 @@ class InfraManager:
         assert os.path.isfile(scoring_server_json)
 
         ss_for_write = open(scoring_server_json, "w")
-        ss_for_write.write("""
+        json = """\
             {
               "port": 7080,
               "repo_uri": "%s",
               "repo_scan_interval": 0,
               "num_acceptors": 2
-            }""" % self.kiji_uri)
+            }""" % self.kiji_uri
+        ss_for_write.write(textwrap.dedent(json))
         ss_for_write.close()
 
     def _fix_scoring_server_lib(self):
@@ -279,18 +287,88 @@ class InfraManager:
             # Remove the path from the name and get just the file name.
             cluster_tar_name = os.path.basename(self.cluster_tgz)
 
-            bento_dir_name = os.path.basename(
-                self.bento_home if not self.bento_home.endswith("/") else self.bento_home[:-1])
-            assert bento_dir_name != ""
-
             # Delete what was there before.
-            fabric.api.run("rm -rf %s" % bento_dir_name)
+            fabric.api.run("rm -rf %s" % self.remote_bento_dir)
 
             # Untar it!
             fabric.api.run("tar -zxvf %s" % cluster_tar_name)
 
         fabric.api.execute(copy_bento, host=self.remote_host)
 
+    # ----------------------------------------------------------------------------------------------
+    # Set up the model repo remotely.
+    def _do_action_install_model_repo(self):
+        """
+        Set up the model repository.
+
+        Create a directory for models and call `kiji model-repo init`
+        """
+
+        def install_model_repo():
+            model_repo_ls = fabric.api.run("ls %s" % self.remote_model_repo_dir, quiet=True)
+
+            # This returns a subclass of string with some attributes.
+            if (model_repo_ls.failed):
+                print "Model repo directory %s not found, creating it." % self.remote_model_repo_dir
+                run("mkdir %s" % self.remote_model_repo_dir)
+            else:
+                print "Found model repo dir!"
+
+            # Run the Kiji command to set up the model repo.
+            self._run_remote_kiji_command(
+                "kiji model-repo init --kiji={kiji_uri} file://{model_repo}".format(
+                    kiji_uri=self.kiji_uri,
+                    model_repo=self.remote_model_repo_dir
+                ))
+
+        fabric.api.execute(install_model_repo, host=self.remote_host)
+
+    # ----------------------------------------------------------------------------------------------
+    # Start the scoring server.
+    def _do_action_start_scoring_server(self):
+        """
+        Update the system table, start the scoring server, sanity check.
+
+        Make sure to kill any previously-running scoring servers.
+
+        """
+
+        def start_scoring_server():
+            jps_results = fabric.api.run("/usr/java/jdk1.7.0_51/bin/jps")
+             # Kill the scoring server
+            for line in jps_results.splitlines():
+                toks = line.split()
+                if len(toks) == 1: continue
+                assert len(toks) == 2, toks
+                (pid, job) = toks
+                if job != 'ScoringServer': continue
+                cmd = "kill -9 " + pid
+                fabric.api.run(cmd)
+
+        fabric.api.execute(start_scoring_server, host=self.remote_host)
+
+        def foo():
+            x = self._get_remote_kiji_command_string("kiji ls")
+            fabric.api.run(x)
+        fabric.api.execute(foo, host=self.remote_host)
+
+    # ----------------------------------------------------------------------------------------------
+    # Utility methods for doing things on the server.
+    def _get_remote_kiji_command_string(self, kiji_command):
+        """
+        :param kiji_command: A kiji command to run.
+        :return: The same command, prefixed with all of the appropriate path setup.
+        """
+        kiji_env = os.path.join(self.remote_bento_dir, "bin", "kiji-env.sh")
+        return "source %s; %s" % (kiji_env, kiji_command)
+
+    def _run_remote_kiji_command(self, kiji_command):
+        """
+        Run a Kiji command on the remote server with the proper environment setup.
+        :param kiji_command: The command to run.
+        """
+        with fabric.api.shell_env(**self.remote_env_vars):
+            fabric.api.run(self._get_remote_kiji_command_string(kiji_command))
 
     def _run_actions(self):
         """ Run whatever actions the user has specified """
@@ -300,6 +378,12 @@ class InfraManager:
 
         if "copy-bento" in self.actions:
             self._do_action_copy_bento()
+
+        if "install-model-repo" in self.actions:
+            self._do_action_install_model_repo()
+
+        if "start-scoring-server" in self.actions:
+            self._do_action_start_scoring_server()
 
     def go(self, args):
         try:

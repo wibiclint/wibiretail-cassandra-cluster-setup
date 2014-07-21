@@ -65,9 +65,6 @@ add_action('prepare-bulk-import', 'Create lib dir for bulk import job, copy all 
 
 add_action('bulk-import', 'Bulk import the Best Buy data to Kiji')
 
-add_action('run-simple', 'Try trivial job for debugging classpath')
-
-
 description = """
 Script to set up WibiRetail on Cassandra-Kiji on the infra cluster
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -403,13 +400,20 @@ class InfraManager:
         # the source file - there is nothing special about this assignment.  It it just the last thing that happens
         # before running the Java commands.)
         express_sh_for_write = open(express_sh_file, 'w')
-        for line in express_sh_text.splitlines():
+        b_fixed_set = False
+        b_fixed_guava = False
+        for line in express_sh_text.splitlines(True):
             express_sh_for_write.write(line)
-            if line.startswith('/usr/bin/env bash'):
-                express_sh_for_write.writeln('set -x')
-            if line.startswith('user_argv='):
-                express_sh_for_write.writeln('  # Use sed to remove any guava except for guava 15 from the tmp jars.')
-                express_sh_for_write.writeln("  tmpjars=$(echo ${tmpjars}  | sed 's|file:///\([^/^,]*/\)*guava-1[012346789]\(\.[0-9]\)*\.jar,\{0,1\}||g' )")
+            if line.startswith('#!/usr/bin/env bash'):
+                assert not b_fixed_set
+                express_sh_for_write.write('set -x\n')
+                b_fixed_set = True
+            if line.startswith('  user_argv='):
+                assert not b_fixed_guava
+                express_sh_for_write.write('  # Use sed to remove any guava except for guava 15 from the tmp jars.\n')
+                express_sh_for_write.write("  tmpjars=$(echo ${tmpjars}  | sed 's|file:///\([^/^,]*/\)*guava-1[012346789]\(\.[0-9]\)*\.jar,\{0,1\}||g' )\n\n")
+                b_fixed_guava = True
+        assert b_fixed_guava and b_fixed_set
         express_sh_for_write.close()
 
     def _archive_bento_for_cluster(self):
@@ -563,7 +567,7 @@ class InfraManager:
         self._run_kiji_command(cmd)
 
     def _do_action_create_tables(self):
-        #self._create_wibiretail_tables()
+        self._create_wibiretail_tables()
         self._create_bestbuy_tables()
 
     # ----------------------------------------------------------------------------------------------
@@ -583,7 +587,7 @@ class InfraManager:
             # TODO: Abort if data has already been copied?
 
             # Copy the files.
-            fabric.api.run('hadoop fs -put {input_dir} {hdfs_dir}'.format(
+            fabric.api.run('hadoop fs -put -f {input_dir} {hdfs_dir}'.format(
                 input_dir=self.remote_bestbuy_data_location,
                 hdfs_dir=self.hadoop_root
             ))
@@ -686,7 +690,7 @@ class InfraManager:
 
         def bulk_load():
             self._bulk_load_demo()
-            #self._bulk_load_retail()
+            self._bulk_load_retail()
 
         fabric.api.execute(bulk_load, host=self.remote_host)
 
@@ -767,9 +771,6 @@ class InfraManager:
 
         if 'bulk-import' in self.actions:
             self._do_action_bulk_import()
-
-        if 'run-simple' in self.actions:
-            self._do_action_run_simple()
 
     def go(self, args):
         try:

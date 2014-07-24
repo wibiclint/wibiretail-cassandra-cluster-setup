@@ -17,8 +17,6 @@ import argparse
 import fabric.api
 import fabric.network
 import os
-import pprint
-import subprocess
 import sys
 import re
 import shutil
@@ -114,15 +112,16 @@ class InfraManager:
             default=None)
 
         parser.add_argument(
-            '--retail-tgz',
-            help='WibiRetail archive file name (default is wibi-retail-*-tar.gz in pwd)',
-            default=None)
-
-        parser.add_argument(
             '--demo-home',
             help='Home directory for the retail demo (assumed to be source, after running "mvn clean package"' +
                  ' (Default is pwd/retail-demo)',
             default='retail-demo')
+
+        parser.add_argument(
+            '--retail-home',
+            help='Home directory for wibi-retail-core (assumed to be source, after running "mvn clean package"' +
+                 ' (Default is pwd/wibi-retail-core)',
+            default='wibi-retail-core')
 
         return parser
 
@@ -154,33 +153,27 @@ class InfraManager:
         assert m_bento, bento_root
         return 'kiji-bento-%s' % m_bento.group('release')
 
-    def _get_retail_dir_from_archive_name(self, retail_tgz):
-        retail_root = os.path.basename(retail_tgz)
-        p_retail = re.compile(r'wibi-retail-(?P<version>\d+\.\d+\.\d+(-SNAPSHOT)?)-release.tar.gz')
-        m_retail = p_retail.match(retail_root)
-        assert m_retail
-        return 'wibi-retail-%s' % m_retail.group('version')
-
     def _setup_environment_vars(self, opts):
         """ Set up useful variables (would be environment vars outside of the script) """
 
         self.bento_tgz = self._get_archive_location(opts.bento_tgz, "kiji-bento")
-        self.retail_tgz = self._get_archive_location(opts.retail_tgz, "wibi-retail")
-
         self.local_bento_dir = self._get_bento_dir_from_archive_name(self.bento_tgz)
-        self.local_retail_dir = self._get_retail_dir_from_archive_name(self.retail_tgz)
+        #self.retail_tgz = self._get_archive_location(opts.retail_tgz, "wibi-retail")
+
+        self.local_retail_dir = opts.retail_home
+        assert os.path.isdir(self.local_retail_dir)
 
         self.local_demo_dir = opts.demo_home
         assert os.path.isdir(self.local_demo_dir)
         # TODO: Sanity check that JARs are present here for Avro records.
 
-        if not os.path.isdir(self.local_retail_dir):
-            fabric.api.local("tar -zxvf %s" % self.retail_tgz)
+        #if not os.path.isdir(self.local_retail_dir):
+            #fabric.api.local("tar -zxvf %s" % self.retail_tgz)
         assert os.path.isdir(self.local_retail_dir)
 
         print "Bento Box:            " + self.bento_tgz
         print "Local bento dir:      " + self.local_bento_dir
-        print "Wibi Retail:          " + self.retail_tgz
+        #print "Wibi Retail:          " + self.retail_tgz
         print "Local retail dir:     " + self.local_retail_dir
 
         # Name of archive created from edited Bento Box (to send to infra cluster).
@@ -193,8 +186,12 @@ class InfraManager:
         assert os.path.isfile(self.express_import_jar)
 
         self.retail_layout_jar = \
-            os.path.join(self.local_retail_dir, 'layouts', 'lib', 'retail-layouts-0.2.0.jar')
+            os.path.join(self.local_retail_dir, 'layouts', 'target', 'retail-layouts-0.3.0-SNAPSHOT.jar')
         assert os.path.isfile(self.retail_layout_jar)
+
+        self.retail_models_jar = \
+            os.path.join(self.local_retail_dir, 'models', 'target', 'retail-models-0.3.0-SNAPSHOT.jar')
+        assert os.path.isfile(self.retail_models_jar)
 
         self.local_env_vars = {
             'KIJI_CLASSPATH': self._get_local_kiji_classpath(),
@@ -244,7 +241,7 @@ class InfraManager:
 
         # Just stick in the home directory.
         self.remote_express_import_jar = os.path.basename(self.express_import_jar)
-        self.remote_retail_layout_jar = os.path.basename(self.retail_layout_jar)
+        self.remote_retail_models_jar = os.path.basename(self.retail_models_jar)
 
     def _parse_options(self, args):
         """ Parse the command-line options and configure the script appropriately """
@@ -446,7 +443,6 @@ class InfraManager:
         self._fix_scoring_server_config_json()
         self._fix_scoring_server_lib()
         self._fix_express_sh()
-        self._archive_bento_for_cluster()
 
 
 
@@ -471,6 +467,7 @@ class InfraManager:
             # Untar it!
             fabric.api.run("tar -zxvf %s" % cluster_tar_name)
 
+        self._archive_bento_for_cluster()
         fabric.api.execute(copy_bento, host=self.remote_host)
 
     # ----------------------------------------------------------------------------------------------
@@ -595,44 +592,72 @@ class InfraManager:
         fabric.api.execute(copy_bestbuy_data, host=self.remote_host)
 
     # ----------------------------------------------------------------------------------------------
-    # Prepare for running the bulk importers (copy JARs to the server)
-    def _get_bulk_import_classpath(self):
-        """
-        Generate the bulk import classpath by running mvn dependency:build-classpath.
+    # Utility stuff for calculating and copying dependencies for jobs.
 
-        :return: A list of JARs.
-        """
-        classpath_text_file = os.path.join(self.local_demo_dir, 'express-import', 'runtime_classpath.txt')
+    def _get_runtime_classpath_for_jar(self, jar):
+        target_directory = os.path.dirname(jar)
+        assert not target_directory.endswith('/')
+        (maven_source_directory, target_directory_short) = os.path.split(target_directory)
+        assert target_directory_short == 'target', target_directory_short
+
+        # Classpath text file should be in root maven directory.
+        classpath_text_file = os.path.join(maven_source_directory, 'runtime_classpath.txt')
         if not os.path.isfile(classpath_text_file):
-            fabric.api.local('cd {express_import_dir}; mvn dependency:build-classpath -Dmdep.outputFile={ofile} -DincludeScope=runtime'.format(
+            fabric.api.local('cd {maven_dir}; mvn dependency:build-classpath -Dmdep.outputFile={ofile} -DincludeScope=runtime'.format(
                 ofile=os.path.basename(classpath_text_file),
-                express_import_dir=os.path.dirname(classpath_text_file)
+                maven_dir=maven_source_directory,
             ))
         assert os.path.isfile(classpath_text_file)
         classpath_one_line = open(classpath_text_file).read()
         return classpath_one_line.split(':')
 
-    def _create_bulk_import_lib_dir(self, classpath):
-        assert os.path.isdir(self.bulk_import_lib_dir)
-        for jar in classpath:
+    def _create_lib_dir_for_jar(self, mainjar, lib_dir, other_jars):
+        if os.path.isdir(lib_dir):
+            shutil.rmtree(lib_dir)
+        os.mkdir(lib_dir)
+        for jar in other_jars + [mainjar,]:
             assert os.path.isfile(jar), jar
-            shutil.copyfile(jar, os.path.join(self.bulk_import_lib_dir, os.path.basename(jar)))
+            shutil.copyfile(jar, os.path.join(lib_dir, os.path.basename(jar)))
+
+    def _create_and_transfer_lib_dir_for_jar(self, jar, dirname, extra_jars=None):
+        """
+        Given a JAR for a job, calculate all of its dependencies, copy them to a lib directory, and scp that lib
+        directory over to the infra cluster.
+
+        :param jar: The main JAR used for this job.  Assumed to be located in project/target/something.jar.
+        :param dirname: The lib directory name.
+        :param extra_jars: Any additional JARs needed for this job (beyond the runtime classpath).
+        """
+
+        # Create a file with the runtime classpath (if one does not already exist).
+        runtime_classpath = [jar,]
+        if extra_jars is not None:
+            runtime_classpath += extra_jars
+        runtime_classpath += self._get_runtime_classpath_for_jar(jar)
+
+        # Create a lib dir and copy all of the dependencies there (including the JAR in question).
+        self._create_lib_dir_for_jar(jar, dirname, runtime_classpath)
+
+        # Copy the lib directory over.
+        def copy_lib_dir():
+            # Remove remote copy of this directory.
+            fabric.api.run('rm -rf %s' % dirname)
+            fabric.api.put(dirname)
+
+        fabric.api.execute(copy_lib_dir, host=self.remote_host)
+
+    # ----------------------------------------------------------------------------------------------
+    # Prepare for running the bulk importers (copy JARs to the server)
+
 
     def _do_action_prepare_for_bulk_import(self):
         """ Prepare for running the bulk importer by copying JARs to the server. """
 
-        # Get the classpath for the bulk import job by running mvn dependency:build-classpath -DincludeScope=runtime.
-        # TODO: Need to remember the order for these JARs?
-        bulk_import_classpath = self._get_bulk_import_classpath()
-        fabric.api.local('mkdir -p %s' % self.bulk_import_lib_dir)
-        self._create_bulk_import_lib_dir(bulk_import_classpath)
-
-        def prepare_bulk_load():
-            fabric.api.put(self.express_import_jar)
-            fabric.api.put(self.retail_layout_jar)
-            fabric.api.put(self.bulk_import_lib_dir)
-
-        fabric.api.execute(prepare_bulk_load, host=self.remote_host)
+        self._create_and_transfer_lib_dir_for_jar(
+            jar = self.express_import_jar,
+            dirname = self.bulk_import_lib_dir,
+            extra_jars=[self.retail_layout_jar,],
+        )
 
     # ----------------------------------------------------------------------------------------------
     # Bulk import the data using KijiExpress!!!!!
@@ -642,19 +667,17 @@ class InfraManager:
         print "Bulk loading the retail demo data..."
 
         cmd = format_multiline_command("""\
-            express job
-                --libjars {layout_jar}:{bulk_import_lib_dir}/*
-                {retail_jar}
-                com.wibidata.demo.retail.bulkimport.DemoProductImporter
+            express.py job
+                --jars='{bulk_import_lib_dir}/*'
+                --mode=hdfs
+                --class=com.wibidata.demo.retail.bulkimport.DemoProductImporter
                 --products-table {bb_kiji}/product
                 --review-input {hadoop_root}/best_buy_small/formatted_reviews.json
                 --aux-output {hadoop_root}/aux-output
                 --scalding-exception-trap {hadoop_root}/bb_importer_trap/
-                --input {hadoop_root}/best_buy_small/products
-                --hdfs""".format(
+                --input {hadoop_root}/best_buy_small/products""".format(
             kiji=self.kiji_uri_retail,
             retail_jar=self.remote_express_import_jar,
-            layout_jar=self.remote_retail_layout_jar,
             hadoop_root=self.hadoop_root,
             bb_kiji=self.kiji_uri_bestbuy,
             bulk_import_lib_dir=self.bulk_import_lib_dir,
@@ -667,18 +690,17 @@ class InfraManager:
         print "Bulk loading the WibiRetail data..."
 
         cmd = format_multiline_command("""\
-            express job
-                --libjars {layout_jar}:{bulk_import_lib_dir}/*
-                {retail_jar}
-                com.wibidata.demo.retail.bulkimport.RetailProductImporter
+            express.py job
+                --log-level=debug
+                --jars '{bulk_import_lib_dir}/*'
+                --mode=hdfs
+                --class=com.wibidata.demo.retail.bulkimport.RetailProductImporter
                 --instance-uri {kiji}
                 --product-input {hadoop_root}/best_buy_small/products
                 --review-input {hadoop_root}/best_buy_small/formatted_reviews.json
-                --scalding-exception-trap {hadoop_root}/wr_importer_trap/
-                --hdfs""".format(
+                --scalding-exception-trap {hadoop_root}/wr_importer_trap/""".format(
             kiji=self.kiji_uri_retail,
             retail_jar=self.remote_express_import_jar,
-            layout_jar=self.remote_retail_layout_jar,
             hadoop_root=self.hadoop_root,
             bb_kiji=self.kiji_uri_bestbuy,
             bulk_import_lib_dir=self.bulk_import_lib_dir,
@@ -689,55 +711,43 @@ class InfraManager:
         """ Actually bulk import the Best Buy data!!!! """
 
         def bulk_load():
+
             self._bulk_load_demo()
             self._bulk_load_retail()
 
         fabric.api.execute(bulk_load, host=self.remote_host)
 
-    def _do_action_run_simple(self):
-        self.colors_file = "colors.txt"
+    # ----------------------------------------------------------------------------------------------
+    # Prepare for batch training
 
-        def copy_temp_data():
-            fabric.api.put(self.colors_file)
+    def _do_action_prepare_for_batch_train(self):
+        """ Prepare for running the bulk importer by copying JARs to the server. """
 
-            # Check that the colors data was copied.
-            fabric.api.run('ls %s' % self.colors_file)
+        self.batch_train_lib_dir = self._create_and_transfer_lib_dir_for_jar(
+            jar = self.retail_models_jar,
+            name = 'batch-train',
+        )
 
-            # Make a directory in HDFS.
-            fabric.api.run('hadoop fs -mkdir -p %s' % self.hadoop_root)
-            fabric.api.run('hadoop fs -test -e %s' % self.hadoop_root)
+    # ----------------------------------------------------------------------------------------------
+    # Run all of the training algorithms in batch.
+    def _batch_train_product_similarity_by_text(self):
+        """ Run the batch trainer for product similarity. """
+        print 'Running the product similarity job...'
+        cmd = format_multiline_command('''\
+            express job
+                --libjars {lib_dir}/*
+                {main_jar}
+                com.wibidata.retail.models.batch.ProductSimilarityByTextJob
+                --instance-uri {kiji}
+                --hdfs'''.format(
+            kiji=self.kiji_uri_retail,
+            main_jar=self.remote_retail_models_jar,
+            lib_dir=self.batch_train_lib_dir,
+        ))
+        self._run_remote_kiji_command(cmd)
 
-            # TODO: Abort if data has already been copied?
-
-            # Copy the files.
-            fabric.api.run('hadoop fs -put {colors} {hdfs_dir}'.format(
-                colors=self.colors_file,
-                hdfs_dir=self.hadoop_root
-            ))
-
-        #fabric.api.execute(copy_temp_data, host=self.remote_host)
-
-        def run_express():
-            print "Running trivial Express job..."
-
-            cmd = format_multiline_command("""\
-                express job
-                    --libjars {layout_jar}:{bulk_import_lib_dir}/*
-                    {retail_jar}
-                    com.wibidata.demo.retail.bulkimport.SimpleImporter
-                    --input-file {hadoop_root}/{colors}
-                    --output-table {colors_kiji}/simple
-                    --hdfs""".format(
-                colors_kiji="kiji-cassandra://infra02.ul.wibidata.net/infra02.ul.wibidata.net/simple",
-                colors=self.colors_file,
-                retail_jar=self.remote_express_import_jar,
-                layout_jar=self.remote_retail_layout_jar,
-                hadoop_root=self.hadoop_root,
-                bulk_import_lib_dir=self.bulk_import_lib_dir,
-            ))
-            self._run_remote_kiji_command(cmd)
-
-        fabric.api.execute(run_express, host=self.remote_host)
+    def _do_action_batch_train(self):
+        pass
 
 
     # ----------------------------------------------------------------------------------------------
@@ -771,6 +781,9 @@ class InfraManager:
 
         if 'bulk-import' in self.actions:
             self._do_action_bulk_import()
+
+        if 'batch-train' in self.actions:
+            self._do_action_batch_train()
 
     def go(self, args):
         try:

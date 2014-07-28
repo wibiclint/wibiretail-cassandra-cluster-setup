@@ -61,7 +61,11 @@ add_action("copy-bb-data-to-hdfs", "Copy the Best Buy data onto HDFS in the clus
 
 add_action('prepare-bulk-import', 'Create lib dir for bulk import job, copy all JARs to cluster.')
 
-add_action('bulk-import', 'Bulk import the Best Buy data to Kiji')
+add_action('bulk-import', 'Bulk import the Best Buy data to Kiji with Express.')
+
+add_action('prepare-batch-train', 'Create lib dir for batch training, copy all JARs to cluster.')
+
+add_action('batch-train', 'Run batch training jobsin Express.')
 
 description = """
 Script to set up WibiRetail on Cassandra-Kiji on the infra cluster
@@ -197,7 +201,8 @@ class InfraManager:
             'KIJI_CLASSPATH': self._get_local_kiji_classpath(),
         }
 
-        self.bulk_import_lib_dir = "bulk-import-lib"
+        self.bulk_import_lib_dir = 'bulk-import-lib'
+        self.batch_train_lib_dir = 'batch-train-lib'
 
     def _get_local_kiji_classpath(self):
         """
@@ -723,9 +728,10 @@ class InfraManager:
     def _do_action_prepare_for_batch_train(self):
         """ Prepare for running the bulk importer by copying JARs to the server. """
 
-        self.batch_train_lib_dir = self._create_and_transfer_lib_dir_for_jar(
+        self._create_and_transfer_lib_dir_for_jar(
             jar = self.retail_models_jar,
-            name = 'batch-train',
+            dirname = self.batch_train_lib_dir,
+            extra_jars=[self.retail_layout_jar,],
         )
 
     # ----------------------------------------------------------------------------------------------
@@ -734,21 +740,26 @@ class InfraManager:
         """ Run the batch trainer for product similarity. """
         print 'Running the product similarity job...'
         cmd = format_multiline_command('''\
-            express job
-                --libjars {lib_dir}/*
-                {main_jar}
-                com.wibidata.retail.models.batch.ProductSimilarityByTextJob
-                --instance-uri {kiji}
-                --hdfs'''.format(
+            express.py job
+                --jars '{lib_dir}/*'
+                --mode=hdfs
+                --hadoop-opts '-Dlog4j.configuration=log4j.test.properties'
+                --class=com.wibidata.retail.models.batch.ProductSimilarityByTextJob
+                --do-direct-writes
+                --instance-uri {kiji}'''.format(
             kiji=self.kiji_uri_retail,
-            main_jar=self.remote_retail_models_jar,
             lib_dir=self.batch_train_lib_dir,
         ))
         self._run_remote_kiji_command(cmd)
+        #--hadoop-opts '-Dmapreduce.map.log.level=DEBUG -Dmapreduce.reduce.log.level=DEBUG'
 
     def _do_action_batch_train(self):
-        pass
 
+        def batch_train():
+
+            self._batch_train_product_similarity_by_text()
+
+        fabric.api.execute(batch_train, host=self.remote_host)
 
     # ----------------------------------------------------------------------------------------------
     # Main method.
@@ -781,6 +792,9 @@ class InfraManager:
 
         if 'bulk-import' in self.actions:
             self._do_action_bulk_import()
+
+        if 'prepare-batch-train' in self.actions:
+            self._do_action_prepare_for_batch_train()
 
         if 'batch-train' in self.actions:
             self._do_action_batch_train()

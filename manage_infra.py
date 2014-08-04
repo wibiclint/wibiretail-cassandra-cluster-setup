@@ -64,6 +64,9 @@ add_action('prepare-bulk-import', 'Create lib dir for bulk import job, copy all 
 
 add_action('bulk-import', 'Bulk import the Best Buy data to Kiji')
 
+add_action('prepare-batch-train', '')
+add_action('batch-train', '')
+
 description = """
 Script to set up WibiRetail on Cassandra-Kiji on the infra cluster
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -125,17 +128,6 @@ class InfraManager:
            ' (Default is pwd/wibi-retail-core)',
       default='/Users/clint/work/wibidata/wibi-retail-core')
 
-    parser.add_argument(
-      '--docker-container',
-      default='bento',
-      help='Docker container name [bento]')
-
-    parser.add_argument(
-      '--bento-cluster-home',
-      default='/Users/clint/work/kiji/bento-cluster',
-      help='Location of Docker branch of bento-cluster project'
-    )
-
     return parser
 
 
@@ -166,53 +158,6 @@ class InfraManager:
     assert m_bento, bento_root
     return 'kiji-bento-%s' % m_bento.group('release')
 
-  def _run_docker_command(self, command):
-    """
-    Run a docker command and print and return the results.
-
-    :param command: Docker command to run.
-    :return: Results of running command with fabric.api.local.
-    """
-    my_local_env_vars = self.local_env_vars.copy()
-    my_local_env_vars['DOCKER_HOST'] = self._boot2docker_ip + ":2375"
-    with fabric.api.shell_env(**my_local_env_vars):
-      res = fabric.api.local(command, capture=True)
-      return res
-
-  def _setup_docker(self, opts):
-    """
-    Configure based on docker settings.
-
-    :param opts: Parsed command-line arguments.
-    """
-    docker_container = opts.docker_container
-
-    # Get the boot2docker IP address.
-    boot2docker_status = fabric.api.local("boot2docker status", capture=True)
-    assert boot2docker_status == 'running', boot2docker_status
-
-    ip_text = fabric.api.local('boot2docker ip', capture=True)
-    self._boot2docker_ip = ip_text.split()[-1]
-    self._docker_container = opts.docker_container
-    # Sanity check that there are four dots in the IP address!
-    assert len(self._boot2docker_ip.split('.')) == 4
-
-    # Check that the container actually exists.
-    running_docker = self._run_docker_command("docker ps")
-    b_found = False
-    for line in running_docker.splitlines():
-      toks = line.split()
-      if toks[-1] == self._docker_container:
-        b_found = True
-    assert b_found, "Cannot find running docker container '%s'." % self._docker_container
-
-    self._bento_address = self._run_docker_command(
-      'docker inspect --format="{{.NetworkSettings.IPAddress}}" %s' % self._docker_container)
-    assert len(self._bento_address.split('.')) == 4
-
-    self._bento_host = self._run_docker_command(
-      'docker inspect --format="{{.Config.Hostname}}" %s' % self._docker_container)
-
   def _setup_environment_vars(self, opts):
     """ Set up useful variables (would be environment vars outside of the script) """
     self.local_env_vars = {}
@@ -226,51 +171,39 @@ class InfraManager:
     self.local_demo_dir = opts.demo_home
     assert os.path.isdir(self.local_demo_dir)
 
-    # Figure out IP address information, etc. from docker.
-    self._setup_docker(opts)
-
-    self.kiji_uri_retail = "kiji-cassandra://{host}/{host}/retail".format(host=self._bento_address)
-    self.kiji_uri_bestbuy = "kiji-cassandra://{host}/{host}/bestbuy".format(host=self._bento_address)
+    host = 'localhost'
+    self.kiji_uri_retail = "kiji-cassandra://{host}/{host}/retail".format(host=host)
+    self.kiji_uri_bestbuy = "kiji-cassandra://{host}/{host}/bestbuy".format(host=host)
 
     self.express_import_jar = \
-      os.path.join(self.local_demo_dir, "express-import", "target", "express-import-0.1.0-SNAPSHOT.jar")
+        os.path.join(self.local_demo_dir, "express-import", "target", "express-import-0.1.0-SNAPSHOT.jar")
     assert os.path.isfile(self.express_import_jar)
 
     self.retail_layout_jar = \
-      os.path.join(self.local_retail_dir, 'layouts', 'target', 'retail-layouts-0.3.0-SNAPSHOT.jar')
+        os.path.join(self.local_retail_dir, 'layouts', 'target', 'retail-layouts-0.3.0-SNAPSHOT.jar')
     assert os.path.isfile(self.retail_layout_jar)
 
     self.retail_models_jar = \
-      os.path.join(self.local_retail_dir, 'models', 'target', 'retail-models-0.3.0-SNAPSHOT.jar')
+        os.path.join(self.local_retail_dir, 'models', 'target', 'retail-models-0.3.0-SNAPSHOT.jar')
     assert os.path.isfile(self.retail_models_jar)
 
-    self.local_cluster_dir = opts.bento_cluster_home
-    assert os.path.isdir(self.local_cluster_dir)
-
-    # Check that Hadoop conf dir exists.
-    self.hadoop_conf_dir = os.path.join(self.local_cluster_dir, 'client-conf', 'hadoop')
-    self.hbase_conf_dir = os.path.join(self.local_cluster_dir, 'client-conf', 'hbase')
-
-
     self.local_env_vars = {
-      'KIJI_CLASSPATH': self._get_local_kiji_classpath(),
-      'HADOOP_CONF_DIR': self.hadoop_conf_dir,
-      'HBASE_CONF_DIR': self.hbase_conf_dir,
+        'KIJI_CLASSPATH': self._get_local_kiji_classpath(),
     }
 
     self.bulk_import_lib_dir = "bulk-import-lib"
+    self.batch_train_lib_dir = "batch-train-lib"
 
     print tabulate.tabulate([
-      ["Bento Box", self.bento_tgz],
-      ["Bento directory", self.local_bento_dir],
-      ["WibiRetail directory", self.local_retail_dir],
-      ["Retail Demo directory", self.local_demo_dir],
-      ["bento-cluster directory", self.local_cluster_dir],
-      ["Retail Demo Express import job JAR", self.express_import_jar],
-      ["WibiRetail layouts JAR", self.retail_layout_jar],
-      ["WibiRetail models (training) JAR", self.retail_models_jar],
-      ['Retail URI', self.kiji_uri_retail],
-      ['Best Buy URI', self.kiji_uri_bestbuy],
+        ["Bento Box", self.bento_tgz],
+        ["Bento directory", self.local_bento_dir],
+        ["WibiRetail directory", self.local_retail_dir],
+        ["Retail Demo directory", self.local_demo_dir],
+        ["Retail Demo Express import job JAR", self.express_import_jar],
+        ["WibiRetail layouts JAR", self.retail_layout_jar],
+        ["WibiRetail models (training) JAR", self.retail_models_jar],
+        ['Retail URI', self.kiji_uri_retail],
+        ['Best Buy URI', self.kiji_uri_bestbuy],
     ])
 
   def _get_local_kiji_classpath(self):
@@ -316,10 +249,8 @@ class InfraManager:
     :param kiji_command: The command to run.
     :param additional_kiji_classpathd Additional items to put on KIJI_CLASSPATH (e.g. bento/model_repo/lib for running a model repo command)
     """
-    bento_env = os.path.join(self.local_cluster_dir, "bin", "bento-env.sh")
     kiji_env = os.path.join(self.local_bento_dir, "bin", "kiji-env.sh")
-    cmd_string = "source {bento_env}; source {kiji_env}; source {bento_env}; {command}".format(
-      bento_env=bento_env,
+    cmd_string = "source {kiji_env}; {command}".format(
       kiji_env=kiji_env,
       command=kiji_command
     )
@@ -327,8 +258,8 @@ class InfraManager:
     kiji_classpath = my_local_env_vars.get('KIJI_CLASSPATH', "")
     #my_local_env_vars['HADOOP_USER_NAME'] ='root'
     my_local_env_vars['KIJI_CLASSPATH'] = kiji_classpath + ":" + additional_kiji_classpath
-    my_local_env_vars['HADOOP_HOME'] = '/usr/local/opt/hadoop/libexec'
-    my_local_env_vars['HBASE_HOME'] = '/usr/local/opt/hbase/libexec'
+    #my_local_env_vars['HADOOP_HOME'] = '/usr/local/opt/hadoop/libexec'
+    #my_local_env_vars['HBASE_HOME'] = '/usr/local/opt/hbase/libexec'
     with fabric.api.shell_env(**my_local_env_vars):
       fabric.api.local(cmd_string)
 
@@ -520,24 +451,23 @@ class InfraManager:
   def _do_action_copy_bestbuy_data_to_hdfs(self):
     """ Copy all of the Best Buy data from the normal file system to HDFS. """
 
-    with fabric.api.shell_env(HADOOP_CONF_DIR=self.hadoop_conf_dir, HADOOP_USER_NAME='hdfs'):
-      # Check that the Best Buy data exists.
-      fabric.api.local('ls %s' % self.local_bestbuy_data_location)
+    #with fabric.api.shell_env(HADOOP_CONF_DIR=self.hadoop_conf_dir, HADOOP_USER_NAME='hdfs'):
+    # Check that the Best Buy data exists.
+    fabric.api.local('ls %s' % self.local_bestbuy_data_location)
 
-      # Make a directory in HDFS.
-      fabric.api.local('/usr/local/bin/hadoop fs -mkdir -p %s' % self.hadoop_root)
-      fabric.api.local('/usr/local/bin/hadoop fs -test -e %s' % self.hadoop_root)
-      # TODO: Remove hard-code for username "clint"
-      fabric.api.local('/usr/local/bin/hadoop fs -chown -R clint %s' % self.hadoop_root)
+    # Make a directory in HDFS.
+    fabric.api.local('hadoop fs -mkdir -p %s' % self.hadoop_root)
+    fabric.api.local('hadoop fs -test -e %s' % self.hadoop_root)
+    # TODO: Remove hard-code for username "clint"
+    fabric.api.local('hadoop fs -chown -R clint %s' % self.hadoop_root)
 
-    with fabric.api.shell_env(HADOOP_CONF_DIR=self.hadoop_conf_dir):
-      # TODO: Abort if data has already been copied?
+    # TODO: Abort if data has already been copied?
 
-      # Copy the files.
-      fabric.api.local('/usr/local/bin/hadoop fs -put -f {input_dir} {hdfs_dir}'.format(
-        input_dir=self.local_bestbuy_data_location,
-        hdfs_dir=self.hadoop_root
-      ))
+    # Copy the files.
+    fabric.api.local('hadoop fs -put -f {input_dir} {hdfs_dir}'.format(
+      input_dir=self.local_bestbuy_data_location,
+      hdfs_dir=self.hadoop_root
+    ))
 
   # ----------------------------------------------------------------------------------------------
   # Utility stuff for calculating and copying dependencies for jobs.
@@ -573,11 +503,12 @@ class InfraManager:
 
   def _do_action_prepare_for_bulk_import(self):
     """ Prepare for running the bulk importer by copying JARs to the server. """
+    express_import_jars = self._get_runtime_classpath_for_jar(self.express_import_jar)
 
     self._create_lib_dir_for_jar(
       mainjar = self.express_import_jar,
       lib_dir = self.bulk_import_lib_dir,
-      other_jars=[self.retail_layout_jar,],
+      other_jars=express_import_jars + [self.retail_layout_jar,],
     )
 
   # ----------------------------------------------------------------------------------------------
@@ -586,6 +517,8 @@ class InfraManager:
     """ Run the DemoProductImporter job.  """
 
     print "Bulk loading the retail demo data..."
+
+    assert os.path.isdir(self.bulk_import_lib_dir)
 
     cmd = format_multiline_command("""\
             {bento_dir}/express/bin/express.py
@@ -641,11 +574,12 @@ class InfraManager:
 
   def _do_action_prepare_for_batch_train(self):
     """ Prepare for running the bulk importer by copying JARs to the server. """
+    model_dependency_jars = self._get_runtime_classpath_for_jar(self.retail_models_jar)
 
-    self.batch_train_lib_dir = self._create_lib_dir_for_jar(
-      mainjar = self.retail_models_jar,
-      lib_dir='batch-train',
-      other_jars=[],
+    self._create_lib_dir_for_jar(
+        mainjar = self.retail_models_jar,
+        lib_dir=self.batch_train_lib_dir,
+        other_jars=model_dependency_jars,
     )
 
   # ----------------------------------------------------------------------------------------------
@@ -653,21 +587,55 @@ class InfraManager:
   def _batch_train_product_similarity_by_text(self):
     """ Run the batch trainer for product similarity. """
     print 'Running the product similarity job...'
-    cmd = format_multiline_command('''\
-            express job
-                --libjars {lib_dir}/*
-                {main_jar}
-                com.wibidata.retail.models.batch.ProductSimilarityByTextJob
-                --instance-uri {kiji}
-                --hdfs'''.format(
+    cmd = format_multiline_command("""\
+            express.py job
+                --log-level=debug
+                --jars '{lib_dir}/*'
+                --mode=hdfs
+                --class=com.wibidata.retail.models.batch.ProductSimilarityByTextJob
+                --do-direct-writes
+                --instance-uri {kiji}""".format(
       kiji=self.kiji_uri_retail,
-      main_jar=self.retail_models_jar,
+      lib_dir=self.batch_train_lib_dir,
+    ))
+    self._run_kiji_command(cmd)
+
+  def _batch_train_customers_also_purchased(self):
+    """ Batch train """
+    print 'Running the customers-also-purchased job...'
+    cmd = format_multiline_command("""\
+            express.py job
+                --log-level=debug
+                --jars '{lib_dir}/*'
+                --mode=hdfs
+                --class=com.wibidata.retail.models.batch.CustomersAlsoPurchasedJob
+                --do-direct-writes
+                --instance-uri {kiji}""".format(
+      kiji=self.kiji_uri_retail,
+      lib_dir=self.batch_train_lib_dir,
+    ))
+    self._run_kiji_command(cmd)
+
+  def _batch_train_customers_also_viewed(self):
+    """ Batch train """
+    print 'Running the customers-also-viewed job...'
+    cmd = format_multiline_command("""\
+            express.py job
+                --log-level=debug
+                --jars '{lib_dir}/*'
+                --mode=hdfs
+                --class=com.wibidata.retail.models.batch.CustomersAlsoViewedJob
+                --do-direct-writes
+                --instance-uri {kiji}""".format(
+      kiji=self.kiji_uri_retail,
       lib_dir=self.batch_train_lib_dir,
     ))
     self._run_kiji_command(cmd)
 
   def _do_action_batch_train(self):
-    pass
+    #self._batch_train_product_similarity_by_text() # WAY TOO BIG FOR THE LAPTOP!
+    self._batch_train_customers_also_purchased()
+    self._batch_train_customers_also_viewed()
 
 
   # ----------------------------------------------------------------------------------------------
@@ -698,6 +666,9 @@ class InfraManager:
 
     if 'bulk-import' in self.actions:
       self._do_action_bulk_import()
+
+    if 'prepare-batch-train' in self.actions:
+      self._do_action_prepare_for_batch_train()
 
     if 'batch-train' in self.actions:
       self._do_action_batch_train()

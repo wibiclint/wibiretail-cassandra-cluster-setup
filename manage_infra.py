@@ -22,6 +22,8 @@ import re
 import shutil
 import textwrap
 import tabulate
+import time
+import urllib2
 from argparse import RawTextHelpFormatter
 
 # Command-line "actions" the user can use and the corresponding help messages.
@@ -30,7 +32,7 @@ actions_help = {}
 # Maintains order of possible actions for help.
 possible_actions = []
 
-def add_action(action_name, help_text):
+def add_action(action_name, help_text=''):
   assert not actions_help.has_key(action_name)
   possible_actions.append(action_name)
   # TODO: Remove any extra random white space from the help.
@@ -51,21 +53,21 @@ add_action("copy-bento", """\
         cluster, and unpack it.""")
 
 add_action("install-kiji", "Install kiji instance for wibi retail")
+add_action("create-tables", "Create the WibiRetail tables.")
 
 add_action("install-model-repo", "Create a directory on the server for the model repo and initialize the mode repo.")
-
 add_action("start-scoring-server", "Update the system table and start the scoring server, then verify that it is working.")
-
-add_action("create-tables", "Create the WibiRetail tables.")
 
 add_action("copy-bb-data-to-hdfs", "Copy the Best Buy data onto HDFS in the cluster.")
 
-add_action('prepare-bulk-import', 'Create lib dir for bulk import job, copy all JARs to cluster.')
-
+add_action('prepare-bulk-import', 'Create lib dir for bulk import job.')
 add_action('bulk-import', 'Bulk import the Best Buy data to Kiji')
 
-add_action('prepare-batch-train', '')
-add_action('batch-train', '')
+add_action('prepare-batch-train', 'Create lib dir for the model code.')
+add_action('batch-train', 'Run training for customers also viewed, purchases (no TFIDF...)')
+
+add_action('start-jetty')
+
 
 description = """
 Script to set up WibiRetail on Cassandra-Kiji on the infra cluster
@@ -637,6 +639,17 @@ class InfraManager:
     self._batch_train_customers_also_purchased()
     self._batch_train_customers_also_viewed()
 
+  # ----------------------------------------------------------------------------------------------
+  # Get Jetty and SOLR started.
+  def _do_action_start_jetty(self):
+    with fabric.api.lcd(os.path.join(self.local_demo_dir, 'solr-search')):
+      fabric.api.local('mvn -Djetty.port=8983 jetty:run')
+    # Poll until Jetty actually starts
+    for i in range(10):
+      time.sleep(20)
+      conn = urllib2.request_host("http://localhost:8983/solr/bestbuy/select")
+      if conn.get
+
 
   # ----------------------------------------------------------------------------------------------
   # Main method.
@@ -672,6 +685,9 @@ class InfraManager:
 
     if 'batch-train' in self.actions:
       self._do_action_batch_train()
+
+    if 'start-jetty' in self.actions:
+      self._do_action_start_jetty()
 
   def go(self, args):
     try:

@@ -716,12 +716,43 @@ class InfraManager:
     self._run_remote_kiji_command(cmd)
     #--hadoop-opts '-Dmapreduce.map.log.level=DEBUG -Dmapreduce.reduce.log.level=DEBUG'
 
+  def _batch_train_customers_also_purchased(self):
+    """ Batch train """
+    print 'Running the customers-also-purchased job...'
+    cmd = format_multiline_command("""\
+            express.py job
+                --log-level=debug
+                --jars '{lib_dir}/*'
+                --mode=hdfs
+                --class=com.wibidata.retail.models.batch.CustomersAlsoPurchasedJob
+                --do-direct-writes
+                --instance-uri {kiji}""".format(
+      kiji=self.kiji_uri_retail,
+      lib_dir=self.batch_train_lib_dir,
+    ))
+    self._run_remote_kiji_command(cmd)
+
+  def _batch_train_customers_also_viewed(self):
+    """ Batch train """
+    print 'Running the customers-also-viewed job...'
+    cmd = format_multiline_command("""\
+            express.py job
+                --log-level=debug
+                --jars '{lib_dir}/*'
+                --mode=hdfs
+                --class=com.wibidata.retail.models.batch.CustomersAlsoViewedJob
+                --do-direct-writes
+                --instance-uri {kiji}""".format(
+      kiji=self.kiji_uri_retail,
+      lib_dir=self.batch_train_lib_dir,
+    ))
+    self._run_remote_kiji_command(cmd)
+
   def _do_action_batch_train(self):
-
     def batch_train():
-
-      self._batch_train_product_similarity_by_text()
-
+      #self._batch_train_product_similarity_by_text() # WAY TOO BIG FOR THE LAPTOP!
+      self._batch_train_customers_also_purchased()
+      self._batch_train_customers_also_viewed()
     fabric.api.execute(batch_train, host=self.remote_host)
 
   # ----------------------------------------------------------------------------------------------
